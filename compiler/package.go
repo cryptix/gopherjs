@@ -21,6 +21,8 @@ type funcContext struct {
 	flowDatas     map[string]*flowData
 	escapingVars  []string
 	flattened     bool
+	blocking      bool
+	blockingCalls map[*ast.CallExpr]bool
 	caseCounter   int
 	labelCases    map[string]int
 	hasGoto       map[ast.Node]bool
@@ -104,11 +106,12 @@ func (t *Compiler) Compile(importPath string, files []*ast.File, fileSet *token.
 			dependencies: make(map[types.Object]bool),
 			minify:       minify,
 		},
-		allVars:     make(map[string]int),
-		flowDatas:   map[string]*flowData{"": &flowData{}},
-		caseCounter: 1,
-		labelCases:  make(map[string]int),
-		hasGoto:     make(map[ast.Node]bool),
+		allVars:       make(map[string]int),
+		flowDatas:     map[string]*flowData{"": &flowData{}},
+		caseCounter:   1,
+		labelCases:    make(map[string]int),
+		hasGoto:       make(map[ast.Node]bool),
+		blockingCalls: make(map[*ast.CallExpr]bool),
 	}
 	for name := range reservedKeywords {
 		c.allVars[name] = 1
@@ -538,13 +541,19 @@ func (c *funcContext) translateFunction(t *ast.FuncType, sig *types.Signature, s
 		vars[k] = v
 	}
 	newFuncContext := &funcContext{
-		p:           c.p,
-		sig:         sig,
-		allVars:     vars,
-		flowDatas:   map[string]*flowData{"": &flowData{}},
-		caseCounter: 1,
-		labelCases:  make(map[string]int),
-		hasGoto:     make(map[ast.Node]bool),
+		p:             c.p,
+		sig:           sig,
+		allVars:       vars,
+		flowDatas:     map[string]*flowData{"": &flowData{}},
+		caseCounter:   1,
+		labelCases:    make(map[string]int),
+		hasGoto:       make(map[ast.Node]bool),
+		blockingCalls: make(map[*ast.CallExpr]bool),
+	}
+
+	v := gotoVisitor{c: newFuncContext}
+	for _, stmt := range stmts {
+		ast.Walk(&v, stmt)
 	}
 
 	for _, param := range t.Params.List {
@@ -556,16 +565,15 @@ func (c *funcContext) translateFunction(t *ast.FuncType, sig *types.Signature, s
 			params = append(params, newFuncContext.objectName(newFuncContext.p.info.Defs[ident]))
 		}
 	}
+	if newFuncContext.blocking {
+		params = append(params, "$c")
+	}
 
 	body = newFuncContext.translateFunctionBody(1, stmts)
 	return
 }
 
 func (c *funcContext) translateFunctionBody(indent int, stmts []ast.Stmt) []byte {
-	v := gotoVisitor{c: c}
-	for _, stmt := range stmts {
-		ast.Walk(&v, stmt)
-	}
 	c.localVars = nil
 	if c.flattened {
 		c.localVars = append(c.localVars, "$this = this", "$args = arguments")
@@ -590,10 +598,14 @@ func (c *funcContext) translateFunctionBody(indent int, stmts []ast.Stmt) []byte
 
 		printBody := func() {
 			if c.flattened {
-				c.Printf("/* */ var $s = 0, $f = function() { while (true) { switch ($s) { case 0:")
+				c.Printf("/* */ var $s = 0, $f = function($r) { while (true) { switch ($s) { case 0:")
 				c.translateStmtList(stmts)
 				c.WritePos(token.NoPos)
-				c.Printf("/* */ } break; } }; return $f();")
+				callbackCall := ""
+				if c.blocking {
+					callbackCall = "$c(); "
+				}
+				c.Printf("/* */ } %sreturn; } }; $f(); return $BLK;", callbackCall)
 				return
 			}
 			c.translateStmtList(stmts)
@@ -685,6 +697,31 @@ func (v *gotoVisitor) Visit(node ast.Node) (w ast.Visitor) {
 				v.c.caseCounter++
 			}
 			return nil
+		}
+	case *ast.CallExpr:
+		blocking := false
+		switch f := n.Fun.(type) {
+		case *ast.Ident:
+			o := v.c.p.info.Uses[f]
+			if o != nil && o.Pkg() != nil && o.Pkg().Path() == "main" && o.Name() == "test" {
+				blocking = true
+			}
+		case *ast.SelectorExpr:
+			o := v.c.p.info.Selections[f].Obj()
+			if o.Pkg() != nil && o.Pkg().Path() == "time" && o.Name() == "Sleep" {
+				blocking = true
+			}
+			if isJsPackage(o.Pkg()) && o.Name() == "ReturnAndBlock" {
+				blocking = true
+			}
+		}
+		if blocking {
+			v.c.flattened = true
+			v.c.blocking = true
+			v.c.blockingCalls[n] = true
+			for _, n2 := range v.stack {
+				v.c.hasGoto[n2] = true
+			}
 		}
 	case ast.Expr:
 		return nil

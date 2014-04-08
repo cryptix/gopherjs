@@ -269,7 +269,7 @@ func (t *Compiler) WriteProgramCode(pkgs []*Archive, mainPkgPath string, minify 
 		w.Write([]byte("$packages[\"" + string(pkg.ImportPath) + "\"].init();\n"))
 	}
 
-	w.Write([]byte("$packages[\"" + mainPkgPath + "\"].main();\n\n})();\n"))
+	w.Write([]byte("$packages[\"" + mainPkgPath + "\"].main(function() {});\n\n})();\n"))
 }
 
 func (t *Compiler) WritePkgCode(pkg *Archive, minify bool, w *SourceMapFilter) {

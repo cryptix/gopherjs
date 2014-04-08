@@ -235,25 +235,27 @@ func (c *funcContext) translateStmt(stmt ast.Stmt, label string) {
 			}
 			results = c.resultNames
 		}
+		value := ""
 		switch len(results) {
 		case 0:
-			c.Printf("return;")
+			c.PrintCond(!c.blocking, "return;", "$c(); return;")
+			return
 		case 1:
 			if c.sig.Results().Len() > 1 {
-				c.Printf("return %s;", c.translateExpr(results[0]))
+				value = c.translateExpr(results[0]).String()
 				break
 			}
-			v := c.translateImplicitConversion(results[0], c.sig.Results().At(0).Type())
+			value = c.translateImplicitConversion(results[0], c.sig.Results().At(0).Type()).String()
 			c.delayedOutput = nil
-			c.Printf("return %s;", v)
 		default:
 			values := make([]string, len(results))
 			for i, result := range results {
 				values[i] = c.translateImplicitConversion(result, c.sig.Results().At(i).Type()).String()
 			}
+			value = "[" + strings.Join(values, ", ") + "]"
 			c.delayedOutput = nil
-			c.Printf("return [%s];", strings.Join(values, ", "))
 		}
+		c.PrintCond(!c.blocking, fmt.Sprintf("return %s;", value), fmt.Sprintf("$c(%s); return;", value))
 
 	case *ast.DeferStmt:
 		c.printLabel(label)
@@ -469,10 +471,6 @@ func (c *funcContext) translateStmt(stmt ast.Stmt, label string) {
 			Rhs: []ast.Expr{one},
 		}, label)
 
-	case *ast.ExprStmt:
-		c.printLabel(label)
-		c.Printf("%s;", c.translateExpr(s.X).String())
-
 	case *ast.DeclStmt:
 		c.printLabel(label)
 		decl := s.Decl.(*ast.GenDecl)
@@ -506,6 +504,13 @@ func (c *funcContext) translateStmt(stmt ast.Stmt, label string) {
 			}
 		case token.CONST:
 			// skip, constants are inlined
+		}
+
+	case *ast.ExprStmt:
+		c.printLabel(label)
+		expr := c.translateExpr(s.X).String()
+		if expr != "" {
+			c.Printf("%s;", expr)
 		}
 
 	case *ast.LabeledStmt:
